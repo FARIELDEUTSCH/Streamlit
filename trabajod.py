@@ -20,7 +20,7 @@ import nltk
 from nltk.corpus import stopwords
 from nltk.sentiment import SentimentIntensityAnalyzer
 import plotly.express as px
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 from sentence_transformers import SentenceTransformer
 from keybert import KeyBERT
 import os
@@ -49,12 +49,14 @@ def load_models():
             
         )
         kw_model = KeyBERT(SentenceTransformer("paraphrase-MiniLM-L6-v2"))
-        return sia, summarizer, kw_model
+        qa_model = pipeline("text2text-generation", model="google/flan-t5-base", tokenizer="google/flan-t5-base")
+
+        return sia, summarizer, kw_model, qa_model
     except Exception as e:
         st.error(f"Error al cargar los modelos: {str(e)}")
         return None, None, None
 
-sia, summarizer, kw_model = load_models()
+sia, summarizer, kw_model, qa_model = load_models()
 
 # Funciones mejoradas con manejo de errores
 def classify_sentiment(text):
@@ -233,73 +235,71 @@ if uploaded_file:
             
             with tab3:
                 st.markdown("### Resumen y Temas Principales")
-                
-                if st.button("Generar Análisis", type="primary"):
-                    with st.spinner("Analizando comentarios..."):
-                        try:
-                            # Resumen general
-                            texto_total = " ".join(df['opinion'].astype(str).tolist())
-                            resumen_general = resumir_texto(texto_total)
-                            
-                            # Temas principales
-                            temas = extraer_temas(df['opinion'].astype(str).tolist(), top_n=7)
-                            
-                            # Mostrar resultados
-                            st.markdown("#### 📌 Resumen General")
-                            st.info(resumen_general)
-                            
-                            st.markdown("#### 🔍 Temas Detectados")
-                            for i, tema in enumerate(temas, 1):
-                                st.markdown(f"{i}. {tema.capitalize()}")
-                            
-                            # Análisis por sentimiento
-                            st.markdown("#### 😃😐😠 Temas por Sentimiento")
-                            for sent in ['Positivo', 'Neutro', 'Negativo']:
-                                if sent in df['sentimiento'].values:
-                                    textos = df[df['sentimiento'] == sent]['opinion']
-                                    temas_sent = extraer_temas(textos.tolist(), top_n=3)
-                                    st.markdown(f"**{sent}:** {', '.join(temas_sent)}")
-                        except Exception as e:
-                            st.error(f"Error en el análisis: {str(e)}")
+    # Sección para análisis de texto individual
+                st.markdown("### ✍️ Agregar y Analizar un Nuevo Comentario")
 
+                user_input = st.text_area(
+                    "Escribe un nuevo comentario para analizar y agregar al conjunto:",
+                    height=150,
+                    placeholder="Ej: El producto llegó rápido y en buen estado. Muy recomendado."
+                )
+
+                if st.button("Analizar y Agregar", key="analyze_and_add"):
+                    if user_input.strip():
+                        with st.spinner("Analizando comentario..."):
+                            sentimiento_nuevo = classify_sentiment(user_input)
+                            resumen_nuevo = resumir_texto(user_input)
+
+            # Mostrar resultados al usuario
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Sentimiento detectado", sentimiento_nuevo)
+                            with col2:
+                                st.text_area("Resumen generado", resumen_nuevo, height=100)
+
+            # Agregar al DataFrame original
+                            nueva_fila = pd.DataFrame({
+                                "opinion": [user_input],
+                                "tokens": [[word for word in user_input.lower().split() if word not in stopwords.words('spanish') and len(word) > 2]],
+                                "sentimiento": [sentimiento_nuevo]
+                            })
+
+                            df = pd.concat([df, nueva_fila], ignore_index=True)
+                            st.success("Comentario analizado y agregado exitosamente al conjunto.")
+                    else:
+                        st.warning("Por favor escribe un comentario válido.")
+
+                
+                
+                
     except Exception as e:
         st.error(f"Error al procesar el archivo: {str(e)}")
 
-# Sección para análisis de texto individual
-st.subheader("✍️ Analizar Texto Individual")
-user_input = st.text_area(
-    "Escribe o pega un comentario para analizar:",
-    height=150,
-    placeholder="Ej: El producto es excelente, cumple con todas mis expectativas..."
+    # 6. Interacción libre con los comentarios mediante lenguaje natural
+st.subheader("🗣️ Pregunta sobre los Comentarios ")
+
+user_question = st.text_input(
+    "Escribe una pregunta para que el modelo analice los 20 comentarios cargados:",
+    placeholder="¿Cuál es el resumen general? o ¿Qué temas se discuten?"
 )
 
-if st.button("Analizar Comentario", key="analyze_single"):
-    if user_input.strip():
-        with st.spinner("Analizando..."):
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                sentiment = classify_sentiment(user_input)
-                st.metric("Sentimiento", sentiment)
-            
-            with col2:
-                resumen = resumir_texto(user_input)
-                st.text_area("Resumen", resumen, height=100)
-            
-            with col3:
-                try:
-                    keywords = kw_model.extract_keywords(
-                        user_input, 
-                        top_n=3, 
-                        stop_words='spanish'
-                    )
-                    st.markdown("**Palabras clave:**")
-                    for kw in keywords:
-                        st.markdown(f"- {kw[0]} (score: {kw[1]:.2f})")
-                except:
-                    st.warning("No se pudieron extraer palabras clave")
+if st.button("Enviar"):
+    if not uploaded_file:
+        st.warning("Primero sube un archivo con comentarios.")
+    elif not user_question.strip():
+        st.warning("Escribe una pregunta.")
     else:
-        st.warning("Por favor ingresa un comentario para analizar")
+        with st.spinner("El modelo está pensando..."):
+            context = " ".join(df['opinion'].astype(str).tolist())
+            prompt = f"Contexto: {context}\nPregunta: {user_question}"
+            try:
+                respuesta = qa_model(prompt, max_length=150, do_sample=False)[0]['generated_text']
+                st.markdown("### 🤖 Respuesta del Modelo")
+                st.success(respuesta)
+            except Exception as e:
+                st.error(f"Error al generar respuesta: {str(e)}")
+
+
 
 # Footer
 st.markdown("---")
